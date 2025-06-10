@@ -34,7 +34,9 @@ def _preload_libs(libname):
         logging.debug(f"failed to load {libpath}:\n {e}")
         ctypes.CDLL(libname)
 
-
+# todo:
+#   先为flux_ths_pybind module的loading提供deps信息;
+#   这些so并没有被封装成module, 只是load到进程空间内提供符号信息.
 def _load_deps():
     try:
         _preload_libs("libnvshmem_host.so.3")
@@ -47,6 +49,7 @@ def _load_deps():
 
 
 _load_deps()
+# todo: 类似于import module; import flux_ths_pybind module.
 flux_mod = importlib.import_module(FLUX_TORCH_EXTENSION_NAME)
 
 

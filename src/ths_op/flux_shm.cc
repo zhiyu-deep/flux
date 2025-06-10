@@ -228,12 +228,10 @@ class C10dProcessGroup::Impl {
   std::string name_;
   c10::intrusive_ptr<c10d::ProcessGroup> pg_;
 };
-
 C10dProcessGroup::C10dProcessGroup(
     const std::string &name, c10::intrusive_ptr<c10d::ProcessGroup> pg)
     : impl_(new Impl(name, pg)) {}
 C10dProcessGroup::~C10dProcessGroup() { delete impl_; }
-
 int
 C10dProcessGroup::get_rank() {
   return impl_->get_rank();
@@ -242,7 +240,6 @@ int
 C10dProcessGroup::get_size() {
   return impl_->get_size();
 }
-
 void
 C10dProcessGroup::sync() {
   impl_->sync();
@@ -251,12 +248,14 @@ void
 C10dProcessGroup::all_gather_cpu(const void *src, void *dst, int64_t nbytes) {
   impl_->all_gather_cpu(src, dst, nbytes);
 }
-
 void
 C10dProcessGroup::broadcast_cpu(void *ptr, int64_t nbytes, int root_rank) {
   impl_->broadcast_cpu(ptr, nbytes, root_rank);
 }
 
+// todo: 在group范围内建立cudaIpc, 仅适用于intraNode; 返回tensor列表.
+//   1. ring_mode: 返回的tensor仅包含pre, cur, next三个节点.
+//   2. not ring_mode: 返回的tensor包含world范围内所有节点.
 std::vector<torch::Tensor>
 cudaipc_create_tensor_list(
     Group *group, const std::vector<int64_t> &shape, c10::ScalarType dtype, bool ring_mode) {
@@ -663,6 +662,8 @@ class FluxGroupBarrier : public BarrierInterface {
   std::vector<torch::Tensor> sync_buffers_;
 };
 
+// todo: 在group范围内, 卡间进行barrier.
+//   1. ring mode? 通信规模较小时, 适合使用not ring mode; 通信规模较大时, 使用使用ring mode.
 class GroupBarrier::BarrierImpl {
  public:
   BarrierImpl(std::shared_ptr<Group> group, bool ring_mode) {

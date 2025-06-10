@@ -36,6 +36,7 @@ class Group {
 // never mind the efficiency: just a simple helper
 float all_reduce_max_float(Group *group, const float src);
 
+// todo: 对torch group的封装.
 class C10dProcessGroup : public Group {
  public:
   C10dProcessGroup(const std::string &name, c10::intrusive_ptr<c10d::ProcessGroup> pg);

@@ -128,6 +128,7 @@ def perf_torch(
             if not is_s8_dequant or (is_s8_dequant and TP_GROUP.rank() == 0):
                 full_output += bias
         gemm_end_events[i].record()
+        # todo: 每个进程获得部分结果(output).
         torch.distributed.reduce_scatter_tensor(output, full_output, group=TP_GROUP)
         end_events[i].record()
 

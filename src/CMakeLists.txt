@@ -66,6 +66,21 @@ if (BUILD_THS)
   add_subdirectory(ths_op)
 endif()
 
+set(pybindSrc
+        pybind/ag_gemm.cc
+        pybind/gemm_grouped_v2_ag_scatter.cc
+        pybind/gemm_grouped_v2_gather_rs.cc
+        pybind/gemm_grouped_v3_ag_scatter.cc
+        pybind/gemm_grouped_v3_gather_rs.cc
+        pybind/gemm_only.cc
+        pybind/gemm_rs.cc
+        pybind/ths_op.cc
+)
+add_library(flux_pybind STATIC ${pybindSrc})
+target_include_directories(flux_pybind PRIVATE
+        /root/miniconda3/lib/python3.11/site-packages/torch/include
+        /root/miniconda3/lib/python3.11/site-packages/torch/include/ATen)
+
 include(GNUInstallDirs)
 install(
   DIRECTORY ./ "${PROJECT_SOURCE_DIR}/include/flux/"
