@@ -168,7 +168,13 @@ def perf_flux(
 ):
     is_fp8 = flux.util.is_fp8_dtype(input.dtype)
     is_s8_dequant = input.dtype == torch.int8
+
+    output_dtype = torch.bfloat16 if is_fp8 or is_s8_dequant else input.dtype
+
     M = input.size(0)
+    # todo:
+    #   1. weight在no trans情况下, shape[N, K], colMajor.
+    #   2. weight在trans情况下, 针对weight本身进行trans, shape[K, N], colMajor.
     # todo: transpose here to avoid TN kernel, which has the worst performence
     if transpose_weight:
         with flux.util.with_torch_deterministic(False):
@@ -178,13 +184,13 @@ def perf_flux(
         w = weight
         N = w.size(0)
 
-    output_dtype = torch.bfloat16 if is_fp8 or is_s8_dequant else input.dtype
     gemm_only_op = flux.GemmOnly(
         w.dtype,
         output_dtype,
         transpose_weight=transpose_weight,
         use_fp8_gemm=is_fp8,
     )
+
     gemm_rs_op = flux.GemmRS(
         TP_GROUP,
         NNODES,
@@ -196,6 +202,8 @@ def perf_flux(
         fuse_reduction=fuse_reduction,
         ring_reduction=ring_reduction,
     )
+
+    ####################################################################################################################
 
     warmup_iters = warmup
     total_iters = warmup_iters + iters
@@ -343,11 +351,10 @@ if __name__ == "__main__":
     if args.transpose_weight and (is_fp8 or is_s8_dequant):
         raise ValueError("FP8/S8 GEMM does not support RRR layout")
 
+    # todo: localK为粒度进行计算; 最后每个tp获得localM result.
     assert args.M % TP_GROUP.size() == 0
     assert args.K % TP_GROUP.size() == 0
     local_K = args.K // TP_GROUP.size()
-
-    # input: [M, K], weight: [N, K]
 
     scale = TP_GROUP.rank() + 1
     if is_s8_dequant:

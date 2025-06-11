@@ -119,19 +119,21 @@ class GemmRS::GemmRSImpl {
 
  private:
   // Symmetrically distributed tensor
-  std::vector<torch::Tensor> output_buffers;
-  std::vector<torch::Tensor> reduce_buffers;
+  std::vector<torch::Tensor> output_buffers;      // todo: peer output buffers(localWorld), shape[max_m, n].
+  std::vector<torch::Tensor> reduce_buffers;      // todo: peer reduce buffers(localWorld), shape[reduce_m_dim, n].
   std::vector<torch::Tensor> barrier_buffers;
   std::vector<torch::Tensor> reduce_buffers_pin;
 
   GroupBarrier group_barrier;
+
   torch::Tensor output_buffer;
   torch::Tensor reduce_buffer;
   torch::Tensor barrier_buffer;
   torch::Tensor gemm_buffer;
-  std::vector<void *> output_scatter_ptrs;
+  std::vector<void *> output_scatter_ptrs;        // todo: peer output buffers(allWorld), shape[max_m, n].
   std::vector<void *> barrier_ptrs;
-  std::vector<void *> reduce_buffer_ptrs;
+  std::vector<void *> reduce_buffer_ptrs;         // todo: peer reduce buffers(allWorld), shape[reduce_m_dim, n].
+
   bool no_nvlink;
   int sub_world_size;
   c10::cuda::CUDAStream rs_stream_;
@@ -143,59 +145,6 @@ class GemmRS::GemmRSImpl {
 #ifdef FLUX_REDUCE_SCATTER_WITH_NCCL
   ncclComm_t nccl_comm;
 #endif
-  void
-  init_output_buffer() {
-    // update max_m and allocate buffer
-    if (get_arch() == _Sm90{} || no_nvlink || (get_arch() == _Sm80{} && nnodes > 1)) {
-      int reduce_m_dim = (get_arch() == _Sm90{} && fuse_reduction)
-                             ? (max_m + world_size - 1) / world_size * nnodes * nnodes
-                             : max_m;
-      this->reduce_buffers =
-          flux_create_tensor_list({reduce_m_dim, n_dim}, output_dtype, this->group_.get());
-      static bool use_shm = get_bool_from_env("FLUX_RS_USE_SHM", false);
-      if (use_shm) {
-        this->reduce_buffers_pin =
-            flux_create_shm_tensor_list({reduce_m_dim, n_dim}, output_dtype, this->group_.get());
-      }
-      this->reduce_buffer = this->reduce_buffers[this->local_rank];
-      for (int i = 0; i < world_size; i++) {
-        if (i / this->local_world_size == rank / this->local_world_size) {
-          if (use_shm && this->world_size != this->sub_world_size &&
-              (i + 1) % this->sub_world_size == 0) {
-            reduce_buffer_ptrs[i] =
-                this->reduce_buffers_pin[i % this->local_world_size].data_ptr();
-          } else {
-            reduce_buffer_ptrs[i] = this->reduce_buffers[i % this->local_world_size].data_ptr();
-          }
-          // only check for ranks on the same node
-          FLUX_CHECK(reduce_buffer_ptrs[i] != nullptr) << "nullptr buffer of rank " << i;
-        } else {
-          reduce_buffer_ptrs[i] = nullptr;
-        }
-      }
-    }
-    if (get_arch() == _Sm80{} && nnodes > 1 && from_torch_dtype(this->input_dtype) == _BF16{}) {
-      // SM80 does not support the fuse reduction for the bfloat16 data type
-      // we have to use the float32 global_red instruction when SM80 && nnodes>1 && input_type=bf16
-      // Therefore, in this case, here double the size of the output_buffer.
-      this->output_buffers =
-          flux_create_tensor_list({max_m * 2, n_dim}, output_dtype, this->group_.get());
-    } else {
-      this->output_buffers =
-          flux_create_tensor_list({max_m, n_dim}, output_dtype, this->group_.get());
-    }
-    this->output_buffer = this->output_buffers[this->local_rank];
-    for (int i = 0; i < world_size; ++i) {
-      if (i / this->local_world_size == rank / this->local_world_size) {
-        output_scatter_ptrs[i] = this->output_buffers[i % this->local_world_size].data_ptr();
-        // only check for ranks on the same node
-        TORCH_CHECK(
-            output_scatter_ptrs[i] != nullptr, "nullptr buffer of rank " + std::to_string(i));
-      } else {
-        output_scatter_ptrs[i] = nullptr;
-      }
-    }
-  }
 
   void
   lazy_init_barrier_buffer(int64_t buffer_size) {
@@ -332,6 +281,66 @@ class GemmRS::GemmRSImpl {
   }
 
  public:
+  void
+  init_output_buffer() {
+    // update max_m and allocate buffer
+    if (get_arch() == _Sm90{} || no_nvlink || (get_arch() == _Sm80{} && nnodes > 1)) {
+      int reduce_m_dim = (get_arch() == _Sm90{} && fuse_reduction)
+                             ? (max_m + world_size - 1) / world_size * nnodes * nnodes
+                             : max_m;
+      this->reduce_buffers =
+          flux_create_tensor_list({reduce_m_dim, n_dim}, output_dtype, this->group_.get());
+      static bool use_shm = get_bool_from_env("FLUX_RS_USE_SHM", false);
+      if (use_shm) {
+        this->reduce_buffers_pin =
+            flux_create_shm_tensor_list({reduce_m_dim, n_dim}, output_dtype, this->group_.get());
+      }
+
+      this->reduce_buffer = this->reduce_buffers[this->local_rank];
+
+      for (int i = 0; i < world_size; i++) {
+        if (i / this->local_world_size == rank / this->local_world_size) {
+          if (use_shm && this->world_size != this->sub_world_size &&
+              (i + 1) % this->sub_world_size == 0) {
+            reduce_buffer_ptrs[i] =
+                this->reduce_buffers_pin[i % this->local_world_size].data_ptr();
+          } else {
+            reduce_buffer_ptrs[i] = this->reduce_buffers[i % this->local_world_size].data_ptr();
+          }
+          // only check for ranks on the same node
+          FLUX_CHECK(reduce_buffer_ptrs[i] != nullptr) << "nullptr buffer of rank " << i;
+        } else {
+          reduce_buffer_ptrs[i] = nullptr;
+        }
+      }
+    }
+
+    {
+      if (get_arch() == _Sm80{} && nnodes > 1 && from_torch_dtype(this->input_dtype) == _BF16{}) {
+        // SM80 does not support the fuse reduction for the bfloat16 data type
+        // we have to use the float32 global_red instruction when SM80 && nnodes>1 && input_type=bf16 Therefore, in this case, here double the size of the output_buffer.
+        this->output_buffers =
+            flux_create_tensor_list({max_m * 2, n_dim}, output_dtype, this->group_.get());
+      } else {
+        this->output_buffers =
+            flux_create_tensor_list({max_m, n_dim}, output_dtype, this->group_.get());
+      }
+
+      this->output_buffer = this->output_buffers[this->local_rank];
+
+      for (int i = 0; i < world_size; ++i) {
+        if (i / this->local_world_size == rank / this->local_world_size) {
+          output_scatter_ptrs[i] = this->output_buffers[i % this->local_world_size].data_ptr();
+          // only check for ranks on the same node
+          TORCH_CHECK(
+              output_scatter_ptrs[i] != nullptr, "nullptr buffer of rank " + std::to_string(i));
+        } else {
+          output_scatter_ptrs[i] = nullptr;
+        }
+      }
+    }
+  }
+
   GemmRSImpl(
       std::shared_ptr<Group> group_,
       int32_t nnodes,
@@ -351,15 +360,18 @@ class GemmRS::GemmRSImpl {
         transpose_weight(transpose_weight),
         fuse_reduction(fuse_reduction),
         ring_reduction(ring_reduction),
+
         rank(group_->get_rank()),
         world_size(group_->get_size()),
         local_world_size(world_size / nnodes),
         local_rank(rank % local_world_size),
         node_idx(rank / local_world_size),
+
         group_barrier(this->group_, false),
         output_scatter_ptrs(world_size, nullptr),
         barrier_ptrs(world_size, nullptr),
         reduce_buffer_ptrs(world_size, nullptr),
+
         no_nvlink(!has_nvlink()),
         rs_stream_(CreateReduceScatterStream()),  // private stream. never dup with gemm stream
         is_l20(is_l20_or_not()),
@@ -424,10 +436,12 @@ class GemmRS::GemmRSImpl {
     auto input_dtype = from_torch_dtype(this->input_dtype);
     auto output_dtype = from_torch_dtype(this->output_dtype);
     DataTypeEnum accum_type = is_s8_gemm ? _S32{}() : _FP32{}();
+
     auto dt_conf = make_gemm_dtype_config(
         input_dtype, input_dtype, has_bias ? output_dtype : _Void{}(), output_dtype, accum_type);
 
     fast_accum = fast_accum & dt_conf.is_input_fp8();
+
     bool is_gemm_v2 = ((int)arch < (int)_Sm90{}());
     auto meta = make_gemm_meta(
         dt_conf,
@@ -558,11 +572,14 @@ class GemmRS::GemmRSImpl {
       c10::optional<UnifiedGemmHParams> const &hparams,
       const ReduceScatterOption &opt) {
     auto meta = get_gemm_meta(/*has_bias=*/bias.has_value(), fast_accum);
+
     auto rt_conf = get_rt_conf(input, weight, bias, input_scale, weight_scale);
+
     // get cutlass op
     UnifiedGemmHParams hparams_ =
         hparams.has_value() ? hparams.value() : OpRegistry::instance().get_hparams(meta, rt_conf);
     OpRegistry::OpPtr cutlass_op = OpRegistry::instance().get_op(meta, hparams_);
+
     ReduceScatterArguments reduce_scatter_args{
         .reduce_scatter_num_blocks = opt.num_blocks,
         .rs_stream = rs_stream_,
@@ -984,12 +1001,12 @@ class GemmRS::GemmRSImpl {
 GemmRS::GemmRS(
     std::shared_ptr<Group> group,
     int32_t nnodes,
-    int32_t max_m,
+    int32_t max_m,                 // todo: input size(M)是动态变化的, 提前确定一个较大的M值.
     int32_t n_dim,
-    c10::ScalarType input_dtype,
-    c10::ScalarType output_dtype,
+    c10::ScalarType input_dtype,   // todo: input matrix data type: 1. normal? 2. s8? 3. fp8?
+    c10::ScalarType output_dtype,  // todo: output matrix data type: 1. save as normal? 2. fp16 when s8 or fp8?
     bool transpose_weight,
-    bool fuse_reduction,
+    bool fuse_reduction,           // todo: 控制reduce的计算方式.
     bool ring_reduction)
     : impl_(new GemmRSImpl(
           group,

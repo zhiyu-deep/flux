@@ -342,7 +342,6 @@ cudaipc_create_tensor_list(
   }
   return tensors;
 }
-
 std::vector<torch::Tensor>
 cudaipc_create_tensor_list(
     c10::intrusive_ptr<c10d::ProcessGroup> pg,
@@ -351,6 +350,21 @@ cudaipc_create_tensor_list(
     bool ring_mode) {
   auto group = std::make_unique<C10dProcessGroup>("", pg);
   return cudaipc_create_tensor_list(group.get(), shape, dtype, ring_mode);
+}
+std::vector<torch::Tensor>
+flux_create_tensor_list(
+    const std::vector<int64_t> &shape, c10::ScalarType dtype, Group *group, bool ring_mode) {
+#ifdef FLUX_SHM_USE_NVSHMEM
+  static bool use_nvshmem = get_bool_from_env("FLUX_USE_NVSHMEM", true);
+  if (torch::cuda::device_count() <= kMaxLocalWorldSize && use_nvshmem) {
+    return nvshmem_create_tensor_list(shape, dtype);
+  } else {
+    return cudaipc_create_tensor_list(group, shape, dtype, ring_mode);
+  }
+#else
+  FLUX_CHECK(group != nullptr);
+  return cudaipc_create_tensor_list(group, shape, dtype, ring_mode);
+#endif
 }
 
 void
@@ -405,22 +419,6 @@ flux_create_tensor(
 #else
   FLUX_CHECK(false && "This line should never be reached");
   return torch::Tensor();
-#endif
-}
-
-std::vector<torch::Tensor>
-flux_create_tensor_list(
-    const std::vector<int64_t> &shape, c10::ScalarType dtype, Group *group, bool ring_mode) {
-#ifdef FLUX_SHM_USE_NVSHMEM
-  static bool use_nvshmem = get_bool_from_env("FLUX_USE_NVSHMEM", true);
-  if (torch::cuda::device_count() <= kMaxLocalWorldSize && use_nvshmem) {
-    return nvshmem_create_tensor_list(shape, dtype);
-  } else {
-    return cudaipc_create_tensor_list(group, shape, dtype, ring_mode);
-  }
-#else
-  FLUX_CHECK(group != nullptr);
-  return cudaipc_create_tensor_list(group, shape, dtype, ring_mode);
 #endif
 }
 

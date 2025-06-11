@@ -492,6 +492,7 @@ using _GatherRS = cute::C<CommOpEnum::GatherRS>;
 using _AGKernel = cute::C<CommOpEnum::AGKernel>;
 using _AGScatter = cute::C<CommOpEnum::AGScatter>;
 
+/// todo: communicate type.
 using _IntraNode = cute::C<CommKindEnum::IntraNode>;
 using _AcrossNode = cute::C<CommKindEnum::AcrossNode>;
 using _IntraNodePcie = cute::C<CommKindEnum::IntraNodePcie>;
