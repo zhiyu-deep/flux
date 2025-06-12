@@ -309,11 +309,11 @@ struct GemmMeta : FluxNamedTupleBase<GemmMeta, Ts...> {
       "dtype", "arch", "comm_op", "gemm_layout", "impl", "impl_spec", "comm_spec"};
   FLUX_NAMED_TUPLE_DEFINE_FIELD(dtype, 0)
   FLUX_NAMED_TUPLE_DEFINE_FIELD(arch, 1)
-  FLUX_NAMED_TUPLE_DEFINE_FIELD(comm_op, 2)
-  FLUX_NAMED_TUPLE_DEFINE_FIELD(gemm_layout, 3)
-  FLUX_NAMED_TUPLE_DEFINE_FIELD(impl, 4)
-  FLUX_NAMED_TUPLE_DEFINE_FIELD(impl_spec, 5)
-  FLUX_NAMED_TUPLE_DEFINE_FIELD(comm_spec, 6)
+  FLUX_NAMED_TUPLE_DEFINE_FIELD(comm_op, 2)      // todo: commOp enum.
+  FLUX_NAMED_TUPLE_DEFINE_FIELD(gemm_layout, 3)  // todo: gemm layout enum.
+  FLUX_NAMED_TUPLE_DEFINE_FIELD(impl, 4)         // todo: 实现方式enum, v2? v3? group?
+  FLUX_NAMED_TUPLE_DEFINE_FIELD(impl_spec, 5)    // todo: gemm impl meta.
+  FLUX_NAMED_TUPLE_DEFINE_FIELD(comm_spec, 6)    // todo: comm impl meta.
 
   constexpr GemmMeta() : Base() { check_type(); }
   constexpr GemmMeta(cute::tuple<Ts...> const &tup) : Base(tup) { check_type(); }

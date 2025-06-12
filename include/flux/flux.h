@@ -485,6 +485,7 @@ enum class GemmKernelScheduleEnum : int8_t { Cooperative, PingPong };
 /////////////////////////////////////////////////////
 // Aliases for constant types
 /////////////////////////////////////////////////////
+// todo: commOp类型.
 using _CommNone = cute::C<CommOpEnum::CommNone>;
 using _AllGather = cute::C<CommOpEnum::AllGather>;
 using _ReduceScatter = cute::C<CommOpEnum::ReduceScatter>;
@@ -516,6 +517,7 @@ using _Sm80 = cute::C<ArchEnum::Sm80>;
 using _Sm89 = cute::C<ArchEnum::Sm89>;
 using _Sm90 = cute::C<ArchEnum::Sm90>;
 
+// todo: gemm算法类别: v2? v3? group?
 using _GemmV2 = cute::C<ImplEnum::GemmV2>;
 using _GemmV3 = cute::C<ImplEnum::GemmV3>;
 using _GemmGroupedV2 = cute::C<ImplEnum::GemmGroupedV2>;

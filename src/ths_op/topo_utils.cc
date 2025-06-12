@@ -138,6 +138,7 @@ init_topo(const std::vector<CUdevice> &gpu_device_ids, TopoInfo &topo_info) {
   FLUX_CHECK_GT(world_size, 0);
   topo_info.world_size = world_size;
 
+  // todo: pcie上卡信息列表: bus_id, device_path, numa_id.
   std::vector<int> numa_ids;
   std::vector<std::array<char, MAX_BUSID_SIZE>> bus_ids;
   std::vector<std::string> device_paths;
@@ -277,6 +278,7 @@ initialize_topo(const std::vector<int> &gpu_device_ids) {
             << " nvlink size " << topo_info.nvlink_world_size;
 }
 
+// todo: 初始化当前进程下的TopoInfo.
 void
 initialize_topo(Group *group) {
   initialize_topo(get_processs_group_devices(group));

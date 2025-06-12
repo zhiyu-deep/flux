@@ -29,6 +29,7 @@ struct GemmOperatorBase {
   FLUX_DEFINE_DEFAULT_SPECIAL_FUNCS(GemmOperatorBase)
 
   virtual ~GemmOperatorBase() = default;
+
   virtual void run(
       std::any const &args,
       void *workspace = nullptr,

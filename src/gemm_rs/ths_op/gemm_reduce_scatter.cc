@@ -118,22 +118,26 @@ class GemmRS::GemmRSImpl {
   const int32_t node_idx;
 
  private:
+  GroupBarrier group_barrier;
+
+  torch::Tensor gemm_buffer;                      // todo: workspace.
+
   // Symmetrically distributed tensor
-  std::vector<torch::Tensor> output_buffers;
+  std::vector<torch::Tensor> output_buffers;      // todo: 用来存放gemm结果, shape[maxM, n].
   std::vector<torch::Tensor> reduce_buffers;
-  std::vector<torch::Tensor> barrier_buffers;
+  std::vector<torch::Tensor> barrier_buffers;     // todo: 用来通信, shape[bufferSize].
   std::vector<torch::Tensor> reduce_buffers_pin;
 
-  GroupBarrier group_barrier;
   torch::Tensor output_buffer;
   torch::Tensor reduce_buffer;
   torch::Tensor barrier_buffer;
-  torch::Tensor gemm_buffer;
+
   std::vector<void *> output_scatter_ptrs;
   std::vector<void *> barrier_ptrs;
   std::vector<void *> reduce_buffer_ptrs;
+
   bool no_nvlink;
-  int sub_world_size;
+  int sub_world_size;  // todo: numa subWorld, 注意和localWorldSize区别.
   c10::cuda::CUDAStream rs_stream_;
   cudaEvent_t event_;
   bool is_l20;
@@ -143,6 +147,8 @@ class GemmRS::GemmRSImpl {
 #ifdef FLUX_REDUCE_SCATTER_WITH_NCCL
   ncclComm_t nccl_comm;
 #endif
+
+  /////////////////////////////////////////////////init////////////////////////////////////////////
   void
   init_output_buffer() {
     // update max_m and allocate buffer
@@ -205,7 +211,7 @@ class GemmRS::GemmRSImpl {
     }
     if (!this->barrier_buffers.empty()) {
       auto stream = c10::cuda::getCurrentCUDAStream();
-      group_barrier.barrier_all(stream);
+      group_barrier.barrier_all(stream);      // todo: barrier还在使用, 等待使用完毕.
       c10::cuda::stream_synchronize(stream);
     }
     this->barrier_buffers =
@@ -219,6 +225,37 @@ class GemmRS::GemmRSImpl {
       } else {
         barrier_ptrs[i] = nullptr;
       }
+    }
+  }
+
+  void
+  lazy_init_gemm_buffer(torch::Tensor input, int64_t buffer_size) {
+    if (buffer_size <= 0) {
+      return;
+    }
+    buffer_size = (buffer_size + 127) / 128 * 128;
+    if (!this->gemm_buffer.defined() || buffer_size > this->gemm_buffer.numel()) {
+      auto options = input.options().dtype(c10::ScalarType::Byte);
+      this->gemm_buffer = torch::empty({buffer_size}, options);
+    }
+  }
+
+  c10::cuda::CUDAStream
+  CreateReduceScatterStream() {
+    at::cuda::CUDAGuard guard(at::cuda::current_device());
+    cudaStream_t rs_stream = nullptr;
+    CUDA_CHECK(cudaStreamCreateWithPriority(
+        &rs_stream, cudaStreamNonBlocking, get_highest_cuda_stream_priority()));
+    return at::cuda::getStreamFromExternal(rs_stream, at::cuda::current_device());
+  }
+
+  ////////////////////////////////////////////////init/////////////////////////////////////////////
+
+  ///////////////////////////////////////////////config////////////////////////////////////////////
+  void
+  _ensure_topo_initialized() {
+    if (!topo_utils::is_topo_initialized()) {
+      topo_utils::initialize_topo(this->group_.get());
     }
   }
 
@@ -260,26 +297,7 @@ class GemmRS::GemmRSImpl {
     return get_arch() == _Sm90{};
   }
 
-  void
-  lazy_init_gemm_buffer(torch::Tensor input, int64_t buffer_size) {
-    if (buffer_size <= 0) {
-      return;
-    }
-    buffer_size = (buffer_size + 127) / 128 * 128;
-    if (!this->gemm_buffer.defined() || buffer_size > this->gemm_buffer.numel()) {
-      auto options = input.options().dtype(c10::ScalarType::Byte);
-      this->gemm_buffer = torch::empty({buffer_size}, options);
-    }
-  }
-
-  c10::cuda::CUDAStream
-  CreateReduceScatterStream() {
-    at::cuda::CUDAGuard guard(at::cuda::current_device());
-    cudaStream_t rs_stream = nullptr;
-    CUDA_CHECK(cudaStreamCreateWithPriority(
-        &rs_stream, cudaStreamNonBlocking, get_highest_cuda_stream_priority()));
-    return at::cuda::getStreamFromExternal(rs_stream, at::cuda::current_device());
-  }
+  ///////////////////////////////////////////////config////////////////////////////////////////////
 
   ReduceScatterOption
   materialize(const ReduceScatterOptionWithOptional &opt) {
@@ -351,15 +369,19 @@ class GemmRS::GemmRSImpl {
         transpose_weight(transpose_weight),
         fuse_reduction(fuse_reduction),
         ring_reduction(ring_reduction),
+
         rank(group_->get_rank()),
         world_size(group_->get_size()),
         local_world_size(world_size / nnodes),
         local_rank(rank % local_world_size),
         node_idx(rank / local_world_size),
+
         group_barrier(this->group_, false),
+
         output_scatter_ptrs(world_size, nullptr),
         barrier_ptrs(world_size, nullptr),
         reduce_buffer_ptrs(world_size, nullptr),
+
         no_nvlink(!has_nvlink()),
         rs_stream_(CreateReduceScatterStream()),  // private stream. never dup with gemm stream
         is_l20(is_l20_or_not()),
@@ -424,10 +446,12 @@ class GemmRS::GemmRSImpl {
     auto input_dtype = from_torch_dtype(this->input_dtype);
     auto output_dtype = from_torch_dtype(this->output_dtype);
     DataTypeEnum accum_type = is_s8_gemm ? _S32{}() : _FP32{}();
+
     auto dt_conf = make_gemm_dtype_config(
         input_dtype, input_dtype, has_bias ? output_dtype : _Void{}(), output_dtype, accum_type);
 
     fast_accum = fast_accum & dt_conf.is_input_fp8();
+
     bool is_gemm_v2 = ((int)arch < (int)_Sm90{}());
     auto meta = make_gemm_meta(
         dt_conf,
@@ -562,7 +586,9 @@ class GemmRS::GemmRSImpl {
     // get cutlass op
     UnifiedGemmHParams hparams_ =
         hparams.has_value() ? hparams.value() : OpRegistry::instance().get_hparams(meta, rt_conf);
+
     OpRegistry::OpPtr cutlass_op = OpRegistry::instance().get_op(meta, hparams_);
+
     ReduceScatterArguments reduce_scatter_args{
         .reduce_scatter_num_blocks = opt.num_blocks,
         .rs_stream = rs_stream_,
@@ -581,7 +607,8 @@ class GemmRS::GemmRSImpl {
         .use_1d_ring = opt.use_1d_ring,
         .use_p2p_read = opt.use_p2p_read,
     };
-    auto stream = c10::cuda::getCurrentCUDAStream();
+
+    auto stream = c10::cuda::getCurrentCUDAStream();  // todo: torch gemm run stream.
 
     if (!is_fp8_gemm && !is_s8_gemm) {
       FLUX_CHECK(!input_scale.has_value());
@@ -652,6 +679,7 @@ class GemmRS::GemmRSImpl {
       // need to zero buffers;
       zero_buffers();
     }
+
     cutlass_op->run(args, workspace, stream);
 
   }  // namespace ths_op
@@ -971,13 +999,6 @@ class GemmRS::GemmRSImpl {
         fast_accum,
         std::move(best_hparams),
         opt);
-  }
-
-  void
-  _ensure_topo_initialized() {
-    if (!topo_utils::is_topo_initialized()) {
-      topo_utils::initialize_topo(this->group_.get());
-    }
   }
 };  // namespace flux
 
