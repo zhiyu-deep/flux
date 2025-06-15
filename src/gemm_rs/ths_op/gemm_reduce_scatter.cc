@@ -125,7 +125,7 @@ class GemmRS::GemmRSImpl {
   // Symmetrically distributed tensor
   std::vector<torch::Tensor> output_buffers;      // todo: 用来存放gemm结果, shape[maxM, n].
   std::vector<torch::Tensor> reduce_buffers;
-  std::vector<torch::Tensor> barrier_buffers;     // todo: 用来通信, shape[bufferSize].
+  std::vector<torch::Tensor> barrier_buffers;     // todo: 用来通信, shape[bufferSize], bufferSize = m / blockShapeM * n / blockShapeM, 用来表示每个block的通信符号.
   std::vector<torch::Tensor> reduce_buffers_pin;
 
   torch::Tensor output_buffer;

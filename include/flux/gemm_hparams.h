@@ -159,7 +159,7 @@ struct GemmHParams : FluxNamedTupleBase<GemmHParams, Ts...> {
       "impl_spec", "comm_spec", "tile_shape", "gemm_kind", "mainloop_stage", "raster_order"};
   FLUX_NAMED_TUPLE_DEFINE_FIELD(impl_spec, 0)
   FLUX_NAMED_TUPLE_DEFINE_FIELD(comm_spec, 1)
-  FLUX_NAMED_TUPLE_DEFINE_FIELD(tile_shape, 2)
+  FLUX_NAMED_TUPLE_DEFINE_FIELD(tile_shape, 2)  // todo: ThreadBlockShape.
   FLUX_NAMED_TUPLE_DEFINE_FIELD(gemm_kind, 3)
   FLUX_NAMED_TUPLE_DEFINE_FIELD(mainloop_stage, 4)
   FLUX_NAMED_TUPLE_DEFINE_FIELD(raster_order, 5)

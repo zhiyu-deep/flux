@@ -155,6 +155,7 @@ template <typename tree_visitor_type>
 static constexpr int tree_visitor_size = cute::tuple_size<tree_node_types_t<tree_visitor_type>>();
 }  // namespace
 
+// todo: class, base class(with derived class).
 template <class GemmMetaT, class GemmHParamsT>
 struct GemmV2ReduceScatter_Kernel : public GemmV2BaseKernel<
                                         GemmMetaT,
@@ -227,6 +228,55 @@ struct GemmV2ReduceScatter_Kernel : public GemmV2BaseKernel<
       static_assert(
           cutlass::detail::dependent_false<decltype(rs_meta.comm_kind())>,
           "unsupported comm_kind()");
+    }
+  }
+
+  template <class... Ts>
+  auto
+  custom_evt_d(gemm_v2_impl::KernelParams<Ts...> params) const {
+    using namespace cutlass::epilogue::threadblock;
+    constexpr bool no_nvlink = rs_meta.comm_kind() == _IntraNodePcie{};
+    if constexpr (this->is_s8_gemm) {
+      return this->s8gemm_dequant_evt_d(params);
+    } else if constexpr (no_nvlink) {
+      using ElementAccumulator = typename Base::ElementAccumulator;
+      using ElementC = typename Base::ElementC;
+      using ElementCNonVoid = typename Base::ElementCNonVoid;
+      using ElementD = typename Base::ElementD;
+      using ElementCompute = ElementD;
+      using EVT_Compute0 = Sm80EVT<
+          VisitorCompute<
+              cutlass::multiplies,
+              ElementD,
+              ElementCompute,
+              cutlass::FloatRoundStyle::round_to_nearest>,  // alpha * acc
+          VisitorScalarBroadcast<ElementAccumulator>,       // alpha
+          VisitorAccFetch                                   // acc
+          >;
+      if constexpr (cute::is_void_v<ElementC>) {
+        return make_declval<EVT_Compute0>();
+      } else {
+        using OutputTileThreadMap = decltype(this->output_tile_thread_map(params));
+        // NOTE: Cutlass 2.x evt does not have alternative to Sm90SrcFetch that
+        // fetches the C tensor of the epilogue. So we need to do AuxLoad for C
+        using C = VisitorAuxLoadGemmk<  // using VisitorAuxLoadGemmk instead
+            OutputTileThreadMap,
+            ElementCNonVoid,
+            cute::Stride<int64_t, cute::_1, int64_t>  // StrideMNL
+            >;
+        using EVT_Compute1 = Sm80EVT<  // D
+            VisitorCompute<
+                cutlass::multiply_add,
+                ElementD,
+                ElementCompute,
+                cutlass::FloatRoundStyle::round_to_nearest>,  // beta * C + (alpha * acc)
+            VisitorScalarBroadcast<ElementAccumulator>,       // beta
+            C,                                                // C
+            EVT_Compute0>;
+        return make_declval<EVT_Compute1>();
+      }
+    } else {
+      return this->default_evt_d(params);
     }
   }
 
@@ -348,55 +398,6 @@ struct GemmV2ReduceScatter_Kernel : public GemmV2BaseKernel<
       return this->default_gemm_kernel(params);
     }
   }
-
-  template <class... Ts>
-  auto
-  custom_evt_d(gemm_v2_impl::KernelParams<Ts...> params) const {
-    using namespace cutlass::epilogue::threadblock;
-    constexpr bool no_nvlink = rs_meta.comm_kind() == _IntraNodePcie{};
-    if constexpr (this->is_s8_gemm) {
-      return this->s8gemm_dequant_evt_d(params);
-    } else if constexpr (no_nvlink) {
-      using ElementAccumulator = typename Base::ElementAccumulator;
-      using ElementC = typename Base::ElementC;
-      using ElementCNonVoid = typename Base::ElementCNonVoid;
-      using ElementD = typename Base::ElementD;
-      using ElementCompute = ElementD;
-      using EVT_Compute0 = Sm80EVT<
-          VisitorCompute<
-              cutlass::multiplies,
-              ElementD,
-              ElementCompute,
-              cutlass::FloatRoundStyle::round_to_nearest>,  // alpha * acc
-          VisitorScalarBroadcast<ElementAccumulator>,       // alpha
-          VisitorAccFetch                                   // acc
-          >;
-      if constexpr (cute::is_void_v<ElementC>) {
-        return make_declval<EVT_Compute0>();
-      } else {
-        using OutputTileThreadMap = decltype(this->output_tile_thread_map(params));
-        // NOTE: Cutlass 2.x evt does not have alternative to Sm90SrcFetch that
-        // fetches the C tensor of the epilogue. So we need to do AuxLoad for C
-        using C = VisitorAuxLoadGemmk<  // using VisitorAuxLoadGemmk instead
-            OutputTileThreadMap,
-            ElementCNonVoid,
-            cute::Stride<int64_t, cute::_1, int64_t>  // StrideMNL
-            >;
-        using EVT_Compute1 = Sm80EVT<  // D
-            VisitorCompute<
-                cutlass::multiply_add,
-                ElementD,
-                ElementCompute,
-                cutlass::FloatRoundStyle::round_to_nearest>,  // beta * C + (alpha * acc)
-            VisitorScalarBroadcast<ElementAccumulator>,       // beta
-            C,                                                // C
-            EVT_Compute0>;
-        return make_declval<EVT_Compute1>();
-      }
-    } else {
-      return this->default_evt_d(params);
-    }
-  }
 };
 
 template <class GemmMetaT, class GemmHParamsT, class GemmKernelT>
@@ -426,6 +427,7 @@ class GemmV2ReduceScatter_Device
   using Base::is_fp8_gemm;
   using Base::is_sm89;
 
+  /////////////////////////////////////////////gemm device impl select/////////////////////////////
   auto
   custom_gemm_device() const {
     if constexpr (rs_meta.comm_kind() == _IntraNodePcie{}) {
@@ -434,7 +436,9 @@ class GemmV2ReduceScatter_Device
       return make_declval<cutlass::gemm::device::GemmUniversalBase<GemmKernelT>>();
     }
   }
+  /////////////////////////////////////////////gemm device impl select/////////////////////////////
 
+  /////////////////////////////////////////////////args explanation////////////////////////////////
   auto
   to_gemm_args_impl(GemmReduceScatterArguments const &args, void *args_workspace) const {
     using Gemm = identity_t<decltype(this->gemm_device())>;
@@ -784,6 +788,11 @@ class GemmV2ReduceScatter_Device
 
  public:
   auto
+  to_argument_type(std::any const &args) const {
+    return std::any_cast<GemmReduceScatterArguments>(args);
+  }
+
+  auto
   to_gemm_args(std::any const &args, void *args_workspace) const {
     if constexpr (is_sm89 && is_fp8_gemm) {
       return to_fp8_gemm_args_impl(to_argument_type(args), args_workspace);
@@ -794,6 +803,10 @@ class GemmV2ReduceScatter_Device
     }
   }
 
+  /////////////////////////////////////////////////args explanation////////////////////////////////
+
+  //////////////////////////////////////////workspaceSize determination////////////////////////////
+  // todo: 主要是计算通信量的空间大小.
   std::size_t
   get_barrier_workspace_size(std::any const &var_args) const override {
     const auto &args = to_argument_type(var_args);
@@ -808,6 +821,7 @@ class GemmV2ReduceScatter_Device
     return align_buffer(nflags * sizeof(SystemBarrier::T));
   }
 
+  // todo: 主要是计算segment struct的空间大小, kernel内部需要使用.
   [[nodiscard]] size_t
   get_args_workspace_size(std::any const &args) const override {
     if constexpr (rs_meta.comm_kind() == _IntraNodePcie{}) {
@@ -816,11 +830,6 @@ class GemmV2ReduceScatter_Device
     }
     return 0;
   }
-
- private:
-  auto
-  to_argument_type(std::any const &args) const {
-    return std::any_cast<GemmReduceScatterArguments>(args);
-  }
+  //////////////////////////////////////////workspaceSize determination////////////////////////////
 };
 }  // namespace bytedance::flux

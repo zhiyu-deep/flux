@@ -25,6 +25,7 @@
 
 namespace bytedance::flux {
 
+// todo: 控制kernel的基本流程.
 // Usage:
 //   let a gemm impl class to derive from this in CRTP form.
 //   so that the impl class is derived from GemmOperatorBase and
@@ -56,7 +57,7 @@ struct GemmOperatorBaseDefaultImplMixin : public GemmOperatorBase {
       : std::true_type {};
 
  private:
-  std::any gemm_op_;
+  std::any gemm_op_;  // todo: 实例化cutlass::gemm:device::impl<kernel>.
 
  public:
   // FLUX_DEFINE_DEFAULT_SPECIAL_FUNCS(GemmOperatorBaseDefaultImplMixin)

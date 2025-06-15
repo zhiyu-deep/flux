@@ -67,6 +67,7 @@ to_gemm_shape(Tuple tuple) {
 
 namespace gemm_v2_impl {
 namespace detail {
+// todo: 主要是为了检测Op<Args...>, 通过为true, 未通过为false.
 template <class AlwaysVoid, template <class...> class Op, class... Args>
 struct detector : public std::false_type {};
 template <template <class...> class Op, class... Args>
@@ -74,13 +75,13 @@ struct detector<std::void_t<Op<Args...>>, Op, Args...> : public std::true_type {
 template <template <class...> class Op, class... Args>
 using is_detected = typename detail::detector<void, Op, Args...>;
 
+// todo: has判断当作一个op, 对一个行为进行判断.
 template <typename T>
 using has_custom_gemm_device_ = decltype(&T::custom_gemm_device);
-
 template <typename T, typename... TArgs>
 using has_custom_evt_d_ = decltype(&T::template custom_evt_d<TArgs...>);
 }  // namespace detail
-
+// todo: 对某个行为进行判断, 并且将判断结果转为bool值.
 template <typename T>
 constexpr bool has_custom_gemm_device =
     detail::is_detected<detail::has_custom_gemm_device_, T>::value;
@@ -88,6 +89,7 @@ template <typename T, typename... TArgs>
 constexpr bool has_custom_evt_d =
     detail::is_detected<detail::has_custom_evt_d_, T, TArgs...>::value;
 
+// todo: param container.
 template <class TBSwizzle, class AlignmentC, class EVT>
 struct KernelParams {
   auto
@@ -158,14 +160,39 @@ struct GemmV2BaseKernel {
 
   template <class... Ts>
   auto
-  evt_d(gemm_v2_impl::KernelParams<Ts...> params) const {
-    if constexpr (gemm_v2_impl::has_custom_evt_d<DerivedImpl, Ts...>) {
-      // if Derived has defined evt_d then CRTP it
-      return static_cast<DerivedImpl const *>(this)->custom_evt_d(params);
-    } else if constexpr (is_s8_gemm) {
-      return this->s8gemm_dequant_evt_d(params);
+  default_evt_d(gemm_v2_impl::KernelParams<Ts...> params) const {
+    using namespace cutlass::epilogue::threadblock;
+    using ElementCompute = ElementD;
+    using EVT_Compute0 = Sm80EVT<
+        VisitorCompute<
+            cutlass::multiplies,
+            ElementD,
+            ElementCompute,
+            cutlass::FloatRoundStyle::round_to_nearest>,  // alpha * acc
+        VisitorScalarBroadcast<ElementAccumulator>,       // alpha
+        VisitorAccFetch                                   // acc
+        >;
+    if constexpr (cute::is_void_v<ElementC>) {  // no bias
+      return make_declval<EVT_Compute0>();
     } else {
-      return this->default_evt_d(params);
+      using OutputTileThreadMap = decltype(this->output_tile_thread_map(params));
+      // NOTE: Cutlass 2.x evt does not have alternative to Sm90SrcFetch that
+      // fetches the C tensor of the epilogue. So we need to do AuxLoad for C
+      using C = VisitorAuxLoad<
+          OutputTileThreadMap,
+          ElementCNonVoid,
+          cute::Stride<int64_t, cute::_1, int64_t>  // StrideMNL
+          >;
+      using EVT_Compute1 = Sm80EVT<  // D
+          VisitorCompute<
+              cutlass::multiply_add,
+              ElementD,
+              ElementCompute,
+              cutlass::FloatRoundStyle::round_to_nearest>,  // beta * C + (alpha * acc)
+          VisitorScalarBroadcast<ElementAccumulator>,       // beta
+          C,                                                // C
+          EVT_Compute0>;
+      return make_declval<EVT_Compute1>();
     }
   }
 
@@ -224,42 +251,18 @@ struct GemmV2BaseKernel {
 
   template <class... Ts>
   auto
-  default_evt_d(gemm_v2_impl::KernelParams<Ts...> params) const {
-    using namespace cutlass::epilogue::threadblock;
-    using ElementCompute = ElementD;
-    using EVT_Compute0 = Sm80EVT<
-        VisitorCompute<
-            cutlass::multiplies,
-            ElementD,
-            ElementCompute,
-            cutlass::FloatRoundStyle::round_to_nearest>,  // alpha * acc
-        VisitorScalarBroadcast<ElementAccumulator>,       // alpha
-        VisitorAccFetch                                   // acc
-        >;
-    if constexpr (cute::is_void_v<ElementC>) {  // no bias
-      return make_declval<EVT_Compute0>();
+  evt_d(gemm_v2_impl::KernelParams<Ts...> params) const {
+    if constexpr (gemm_v2_impl::has_custom_evt_d<DerivedImpl, Ts...>) {
+      // if Derived has defined evt_d then CRTP it
+      return static_cast<DerivedImpl const *>(this)->custom_evt_d(params);
+    } else if constexpr (is_s8_gemm) {
+      return this->s8gemm_dequant_evt_d(params);
     } else {
-      using OutputTileThreadMap = decltype(this->output_tile_thread_map(params));
-      // NOTE: Cutlass 2.x evt does not have alternative to Sm90SrcFetch that
-      // fetches the C tensor of the epilogue. So we need to do AuxLoad for C
-      using C = VisitorAuxLoad<
-          OutputTileThreadMap,
-          ElementCNonVoid,
-          cute::Stride<int64_t, cute::_1, int64_t>  // StrideMNL
-          >;
-      using EVT_Compute1 = Sm80EVT<  // D
-          VisitorCompute<
-              cutlass::multiply_add,
-              ElementD,
-              ElementCompute,
-              cutlass::FloatRoundStyle::round_to_nearest>,  // beta * C + (alpha * acc)
-          VisitorScalarBroadcast<ElementAccumulator>,       // beta
-          C,                                                // C
-          EVT_Compute0>;
-      return make_declval<EVT_Compute1>();
+      return this->default_evt_d(params);
     }
   }
 
+  // todo: 指定默认的(1. swizzle, 2. alignment, 3. epilogue.)
   auto
   default_kernel_params() const {
     if constexpr (cute::is_same_v<ArchTag, cutlass::arch::Sm89> && this->is_fp8_gemm) {
