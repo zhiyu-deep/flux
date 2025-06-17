@@ -41,7 +41,6 @@ struct GemmOperatorBaseDefaultImplMixin : public GemmOperatorBase {
   struct has_hparams<T, std::void_t<decltype(T::hparams)>>
       : detail::is_gemm_hparams<decay_and_strip_t<decltype(T::hparams)>> {};
 
-  // todo: 判断是否是v3 cutlass.
   template <class T, typename = std::void_t<>>
   struct is_cutlass3_gemm_universal_adapter : std::false_type {};
 
