@@ -236,7 +236,7 @@ struct GemmV2ReduceScatter_Kernel : public GemmV2BaseKernel<
   custom_evt_d(gemm_v2_impl::KernelParams<Ts...> params) const {
     using namespace cutlass::epilogue::threadblock;
     constexpr bool no_nvlink = rs_meta.comm_kind() == _IntraNodePcie{};
-    if constexpr (this->is_s8_gemm) {
+    if constexpr (GemmV2ReduceScatter_Kernel::is_s8_gemm) {
       return this->s8gemm_dequant_evt_d(params);
     } else if constexpr (no_nvlink) {
       using ElementAccumulator = typename Base::ElementAccumulator;
@@ -312,6 +312,92 @@ struct GemmV2ReduceScatter_Kernel : public GemmV2BaseKernel<
     }
   }
 
+  auto gemm_kernel_container() const {
+    using ElementCompute = typename Base::ElementD;
+    auto params = this->kernel_params();
+    if constexpr (rs_meta.comm_kind() == _IntraNodePcie{}) {
+      if constexpr (is_fp8_gemm && is_sm89) {
+        using ElementA = typename Base::ElementA;
+        using ElementB = typename Base::ElementB;
+        using ElementC = typename Base::ElementC;
+        using ElementCNonVoid = typename Base::ElementCNonVoid;
+        using ElementD = typename Base::ElementD;
+        using ElementAccumulator = typename Base::ElementAccumulator;
+        constexpr int AlignmentA = Base::AlignmentA;
+        constexpr int AlignmentB = Base::AlignmentB;
+        using GmemLayoutA = typename Base::GmemLayoutA;
+        using GmemLayoutB = typename Base::GmemLayoutB;
+        using GmemLayoutC = typename Base::GmemLayoutC;
+        using OpClass = typename Base::OpClass;
+        using ArchTag = typename Base::ArchTag;
+        using ThreadblockShape = typename Base::ThreadblockShape;
+        using WarpShape = typename Base::WarpShape;
+        using InstructionShape = typename Base::InstructionShape;
+        using Operation = cute::conditional_t<
+            to_gemm_v2_meta(meta.impl_spec()).fast_accum(),
+            cutlass::arch::OpMultiplyAddFastAccum,
+            cutlass::arch::OpMultiplyAdd>;
+        using SM89Impl = cutlass::gemm::kernel::DefaultGemmRSWithAbsMax<
+            ElementA,
+            GmemLayoutA,
+            cutlass::ComplexTransform::kNone,
+            AlignmentA,
+            ElementB,
+            GmemLayoutB,
+            cutlass::ComplexTransform::kNone,
+            AlignmentB,
+            ElementCNonVoid,
+            GmemLayoutC,
+            ElementAccumulator,
+            OpClass,
+            ArchTag,
+            ThreadblockShape,
+            WarpShape,
+            InstructionShape,
+            decltype(params.evt()),
+            decltype(params.tb_swizzle()),
+            hparams.mainloop_stage(),
+            Operation>;
+        return make_declval<SM89Impl>();
+      } else {
+        using ElementScale = typename Base::ElementScale;
+        using ElementD = typename Base::ElementD;
+        using ElementCompute = std::conditional_t<GemmV2ReduceScatter_Kernel::is_s8_gemm, ElementScale, ElementD>;
+        using MulAddOp = std::conditional_t<
+            GemmV2ReduceScatter_Kernel::is_s8_gemm,
+            cutlass::arch::OpMultiplyAddSaturate,
+            cutlass::arch::OpMultiplyAdd>;
+        using Impl = cutlass::gemm::kernel::GemmkWithVisitor<
+            typename Base::ElementA,
+            typename Base::GmemLayoutA,
+            cutlass::ComplexTransform::kNone,
+            Base::AlignmentA,
+            typename Base::ElementB,
+            typename Base::GmemLayoutB,
+            cutlass::ComplexTransform::kNone,
+            Base::AlignmentB,
+            typename Base::ElementCNonVoid,
+            typename Base::GmemLayoutC,
+            params.alignment_c(),
+            typename Base::ElementAccumulator,
+            ElementCompute,
+            typename Base::OpClass,
+            typename Base::ArchTag,
+            typename Base::ThreadblockShape,
+            typename Base::WarpShape,
+            typename Base::InstructionShape,
+            decltype(params.evt()),
+            decltype(params.tb_swizzle()),
+            hparams.mainloop_stage(),
+            MulAddOp,
+            Base::EVTEpilogueStages>;
+        return make_declval<Impl>();
+      }
+    } else {
+      return this->default_gemm_kernel_container(params);
+    }
+  };
+
   auto
   gemm_kernel() const {
     using ElementCompute = typename Base::ElementD;
@@ -363,9 +449,9 @@ struct GemmV2ReduceScatter_Kernel : public GemmV2BaseKernel<
       } else {
         using ElementScale = typename Base::ElementScale;
         using ElementD = typename Base::ElementD;
-        using ElementCompute = std::conditional_t<this->is_s8_gemm, ElementScale, ElementD>;
+        using ElementCompute = std::conditional_t<GemmV2ReduceScatter_Kernel::is_s8_gemm, ElementScale, ElementD>;
         using MulAddOp = std::conditional_t<
-            this->is_s8_gemm,
+            GemmV2ReduceScatter_Kernel::is_s8_gemm,
             cutlass::arch::OpMultiplyAddSaturate,
             cutlass::arch::OpMultiplyAdd>;
         using Impl = cutlass::gemm::kernel::GemmkWithVisitor<
@@ -439,6 +525,7 @@ class GemmV2ReduceScatter_Device
   /////////////////////////////////////////////gemm device impl select/////////////////////////////
 
   /////////////////////////////////////////////////args explanation////////////////////////////////
+  // todo: 将对外的arguments转为device侧的params.
   auto
   to_gemm_args_impl(GemmReduceScatterArguments const &args, void *args_workspace) const {
     using Gemm = identity_t<decltype(this->gemm_device())>;

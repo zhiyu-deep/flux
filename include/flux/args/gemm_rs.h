@@ -18,6 +18,7 @@
 #pragma once
 namespace bytedance::flux {
 
+// todo: 对外暴露的参数.
 struct ReduceScatterArguments {
   int reduce_scatter_num_blocks = 12;
   void *rs_stream = nullptr;

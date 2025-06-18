@@ -303,6 +303,120 @@ struct GemmV2BaseKernel {
 
   template <class... Ts>
   auto
+  default_gemm_kernel_container(gemm_v2_impl::KernelParams<Ts...> params) const {
+    /*
+    Ada FP8 GEMM.
+
+    In addition to using FP8 Tensor Core instructions, the Ada FP8 GEMM uses a distinct epilogue
+    that enables additional scaling of operands/outputs, storing a pre-activation-function output
+    tensor (called the "auxiliary" output), and computing the absolute maximum value of the
+    outputs.
+
+    Pseudocode for this epilogue is as follows:
+
+    Aux = ((alpha * scale_a * scale_b) * accumulator) + ((beta * scale_c) * source) + bias
+    D = activation(Aux)
+
+    if Aux is fp8 type:
+        abs_max_output = max( abs(aux) | (for every aux in Aux))
+        Aux = scale_aux * Aux
+    endif
+
+    if D is fp8 type:
+        abs_max_output = max( abs(d) | (for every d in D))
+        D = scale_d * D
+    endif
+
+    Parameter Aux is optionally stored to global memory
+    */
+
+    using Operator = cute::conditional_t<
+        to_gemm_v2_meta(meta.impl_spec()).fast_accum(),
+        cutlass::arch::OpMultiplyAddFastAccum,
+        cutlass::arch::OpMultiplyAdd>;
+    if constexpr (cute::is_same_v<ArchTag, cutlass::arch::Sm89> && this->is_fp8_gemm) {
+      using SM89Impl = cutlass::gemm::kernel::DefaultGemmWithAbsMax<
+          ElementA,
+          GmemLayoutA,
+          cutlass::ComplexTransform::kNone,
+          AlignmentA,
+          ElementB,
+          GmemLayoutB,
+          cutlass::ComplexTransform::kNone,
+          AlignmentB,
+          ElementCNonVoid,
+          GmemLayoutC,
+          ElementAccumulator,
+          OpClass,
+          ArchTag,
+          ThreadblockShape,
+          WarpShape,
+          InstructionShape,
+          decltype(params.evt()),
+          decltype(params.tb_swizzle()),
+          hparams.mainloop_stage(),
+          Operator>;
+      return make_declval<SM89Impl>();
+    } else if constexpr (this->is_s8_gemm) {
+      using ElementEpilogueCompute = ElementScale;
+      using SM80S8DequantImpl = cutlass::gemm::kernel::DefaultGemmWithVisitor<
+          ElementA,
+          GmemLayoutA,
+          cutlass::ComplexTransform::kNone,
+          AlignmentA,
+          ElementB,
+          GmemLayoutB,
+          cutlass::ComplexTransform::kNone,
+          AlignmentB,
+          ElementCNonVoid,
+          GmemLayoutC,
+          params.alignment_c(),
+          ElementAccumulator,
+          ElementEpilogueCompute,
+          OpClass,
+          ArchTag,
+          ThreadblockShape,
+          WarpShape,
+          InstructionShape,
+          decltype(params.evt()),
+          decltype(params.tb_swizzle()),
+          hparams.mainloop_stage(),
+          cutlass::arch::OpMultiplyAddSaturate,
+          EVTEpilogueStages>;
+      return make_declval<SM80S8DequantImpl>();
+    } else {
+      using ElementCompute = ElementD;
+
+      using Impl = cutlass::gemm::kernel::DefaultGemmWithVisitor<
+          ElementA,
+          GmemLayoutA,
+          cutlass::ComplexTransform::kNone,
+          AlignmentA,
+          ElementB,
+          GmemLayoutB,
+          cutlass::ComplexTransform::kNone,
+          AlignmentB,
+          ElementCNonVoid,
+          GmemLayoutC,
+          params.alignment_c(),
+          ElementAccumulator,
+          ElementCompute,
+          OpClass,
+          ArchTag,
+          ThreadblockShape,
+          WarpShape,
+          InstructionShape,
+          decltype(params.evt()),
+          decltype(params.tb_swizzle()),
+          hparams.mainloop_stage(),
+          cutlass::arch::OpMultiplyAdd,
+          EVTEpilogueStages>;
+      return make_declval<Impl>();
+    }
+  }
+
+  template <class... Ts>
+  auto
   default_gemm_kernel(gemm_v2_impl::KernelParams<Ts...> params) const {
     /*
     Ada FP8 GEMM.
@@ -449,15 +563,15 @@ class GemmV2BaseDevice
   using typename KernelBuilder::ThreadblockShape;
   using typename KernelBuilder::TileShape;
 
+ public:
+  //////////////////////////
+  // CRTP functions
+  //////////////////////////
   auto
   default_gemm_device() const {
     return make_declval<cutlass::gemm::device::GemmUniversalBase<GemmKernelT>>();
   }
 
- public:
-  //////////////////////////
-  // CRTP functions
-  //////////////////////////
   auto
   gemm_device() const {
     if constexpr (gemm_v2_impl::has_custom_gemm_device<DerivedImpl>) {
